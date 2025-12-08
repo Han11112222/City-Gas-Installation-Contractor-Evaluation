@@ -179,7 +179,7 @@ else:
 
 df_proc, agg_all, eligible, usage_by_type, month_cols = preprocess(raw_df)
 
-# 용도별 요약 및 1위 시공업체
+# 용도별 요약 및 1위 시공업체(가정용외 분석용으로 사용)
 type_summary = (
     usage_by_type.groupby("용도")
     .agg(
@@ -188,7 +188,6 @@ type_summary = (
     )
     .reset_index()
 )
-
 idx = usage_by_type.groupby("용도")["연간사용량_추정"].idxmax()
 top_per_type = usage_by_type.loc[idx, ["용도", "시공업체", "연간사용량_추정", "전수"]]
 type_summary = type_summary.merge(top_per_type, on="용도", how="left")
@@ -326,102 +325,242 @@ with tab_rank:
         )
 
 # --------------------------------------------------
-# 탭 2 : 용도별 분석
+# 탭 2 : 용도별 분석 (주택용 vs 가정용외 + 가정용외 용도별)
 # --------------------------------------------------
 with tab_type:
-    st.subheader("🐱 용도별 사용량 및 1위 시공업체")
+    st.subheader("🐱 대분류별 사용량 요약 (주택용 vs 가정용외)")
 
-    type_disp = type_summary.copy()
-    type_disp["1위 연간사용량(m³)"] = type_disp["연간사용량_추정"].map(fmt_int)
-    type_disp["1위 전수(전)"] = type_disp["전수"].map(lambda x: f"{int(x):,}")
+    # 주택용(단독주택) vs 가정용외 구분
+    is_detached = df_proc["용도"] == "단독주택"
+    df_detached = df_proc[is_detached]
+    df_nonres = df_proc[~is_detached]
 
-    type_disp = type_disp.rename(
-        columns={
-            "시공업체": "1위 시공업체",
-        }
-    )
+    rows = [
+        {
+            "대분류": "주택용(단독주택)",
+            "계량기 수(전)": df_detached["계량기번호"].nunique(),
+            "추정 연간사용량(m³)": df_detached["연간사용량_추정"].sum(),
+        },
+        {
+            "대분류": "가정용외",
+            "계량기 수(전)": df_nonres["계량기번호"].nunique(),
+            "추정 연간사용량(m³)": df_nonres["연간사용량_추정"].sum(),
+        },
+        {
+            "대분류": "합계",
+            "계량기 수(전)": df_proc["계량기번호"].nunique(),
+            "추정 연간사용량(m³)": df_proc["연간사용량_추정"].sum(),
+        },
+    ]
+    big_df = pd.DataFrame(rows)
+    big_df["계량기 수(전)"] = big_df["계량기 수(전)"].map(lambda x: f"{int(x):,}")
+    big_df["추정 연간사용량(m³)"] = big_df["추정 연간사용량(m³)"].map(fmt_int)
 
-    # 용도, 1위 시공업체, 연간사용량, 전수 순서로 표시
     st.dataframe(
-        type_disp[["용도", "1위 시공업체", "1위 연간사용량(m³)", "1위 전수(전)"]],
+        big_df,
         use_container_width=True,
         hide_index=True,
     )
 
     st.markdown("---")
-    st.markdown("#### 🐰 용도별 시공업체 순위")
+    st.markdown("#### 🐰 대분류별·용도별 시공업체 순위")
 
-    type_list = sorted(usage_by_type["용도"].unique().tolist())
-    selected_type = st.selectbox("용도 선택", type_list)
-
-    sub = usage_by_type[usage_by_type["용도"] == selected_type].copy()
-    sub = sub.sort_values("연간사용량_추정", ascending=False)
-    sub["순위"] = np.arange(1, len(sub) + 1)
-    sub["연간총"] = sub["연간사용량_추정"]
-    sub["추정 연간사용량(m³)"] = sub["연간총"].map(fmt_int)
-    sub["전수(전)"] = sub["전수"].map(lambda x: f"{int(x):,}")
-
-    # 순위, 시공업체, 연간사용량, 전수 순서
-    st.dataframe(
-        sub[["순위", "시공업체", "추정 연간사용량(m³)", "전수(전)"]],
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "순위": st.column_config.NumberColumn("순위", width="small"),
-        },
+    sub_tab1, sub_tab2, sub_tab3 = st.tabs(
+        ["주택용(단독주택) 순위", "가정용외 순위", "가정용외 용도별 분석"]
     )
 
-    # 상위 15개 업체까지 바 차트
-    top_n_type = min(15, sub.shape[0])
-    chart_type = sub.head(top_n_type)
-    fig_type = px.bar(
-        chart_type,
-        x="시공업체",
-        y="연간총",
-        text="추정 연간사용량(m³)",
-    )
-    fig_type.update_traces(textposition="outside")
-    fig_type.update_layout(
-        xaxis_title="시공업체",
-        yaxis_title=f"{selected_type} 추정 연간사용량(m³)",
-        margin=dict(l=10, r=10, t=40, b=10),
-    )
-    st.plotly_chart(fig_type, use_container_width=True)
-
-    # 영업용 상세 리스트 (시공업체별 시공 내용)
-    if selected_type == "영업용":
-        st.markdown("---")
-        st.markdown("#### 🐻 영업용 상세 리스트 (시공업체별 시공 내역)")
-
-        company_list = sub["시공업체"].tolist()
-        selected_company_sales = st.selectbox(
-            "영업용 시공업체 선택", company_list
-        )
-
-        detail = df_proc[
-            (df_proc["용도"] == "영업용")
-            & (df_proc["시공업체"] == selected_company_sales)
-        ].copy()
-
-        if detail.empty:
-            st.info("선택한 시공업체의 영업용 시공 내역이 없습니다.")
+    # ── 주택용(단독주택) 순위 ───────────────────────────
+    with sub_tab1:
+        res = usage_by_type[usage_by_type["용도"] == "단독주택"].copy()
+        if res.empty:
+            st.info("단독주택 데이터가 없습니다.")
         else:
-            detail["연간사용량_추정(m³)"] = detail["연간사용량_추정"].map(fmt_int)
-            # 주소 컬럼 이름은 실제 파일에 맞춰서 필요하면 수정
-            detail_cols = [
-                "계량기번호",
-                "고객명",
-                "주소",
-                "자체업종명",
-                "연간사용량_추정(m³)",
-            ]
+            res = res.sort_values("연간사용량_추정", ascending=False)
+            res["순위"] = np.arange(1, len(res) + 1)
+            res["연간총"] = res["연간사용량_추정"]
+            res["추정 연간사용량(m³)"] = res["연간총"].map(fmt_int)
+            res["전수(전)"] = res["전수"].map(lambda x: f"{int(x):,}")
 
-            exist_cols = [c for c in detail_cols if c in detail.columns]
             st.dataframe(
-                detail[exist_cols],
+                res[["순위", "시공업체", "추정 연간사용량(m³)", "전수(전)"]],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "순위": st.column_config.NumberColumn("순위", width="small"),
+                },
+            )
+
+            top_n = min(15, res.shape[0])
+            chart_res = res.head(top_n)
+            fig_res = px.bar(
+                chart_res,
+                x="시공업체",
+                y="연간총",
+                text="추정 연간사용량(m³)",
+            )
+            fig_res.update_traces(textposition="outside")
+            fig_res.update_layout(
+                xaxis_title="시공업체",
+                yaxis_title="단독주택 추정 연간사용량(m³)",
+                margin=dict(l=10, r=10, t=40, b=10),
+            )
+            st.plotly_chart(fig_res, use_container_width=True)
+
+    # ── 가정용외 전체 순위 ─────────────────────────────
+    with sub_tab2:
+        nonres = usage_by_type[usage_by_type["용도"] != "단독주택"].copy()
+        if nonres.empty:
+            st.info("가정용외 데이터가 없습니다.")
+        else:
+            nonres_comp = (
+                nonres.groupby("시공업체")
+                .agg(
+                    연간사용량_추정=("연간사용량_추정", "sum"),
+                    전수=("전수", "sum"),
+                )
+                .reset_index()
+            )
+            nonres_comp = nonres_comp.sort_values(
+                "연간사용량_추정", ascending=False
+            )
+            nonres_comp["순위"] = np.arange(1, len(nonres_comp) + 1)
+            nonres_comp["연간총"] = nonres_comp["연간사용량_추정"]
+            nonres_comp["추정 연간사용량(m³)"] = nonres_comp["연간총"].map(fmt_int)
+            nonres_comp["전수(전)"] = nonres_comp["전수"].map(
+                lambda x: f"{int(x):,}"
+            )
+
+            st.dataframe(
+                nonres_comp[
+                    ["순위", "시공업체", "추정 연간사용량(m³)", "전수(전)"]
+                ],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "순위": st.column_config.NumberColumn("순위", width="small"),
+                },
+            )
+
+            top_n2 = min(15, nonres_comp.shape[0])
+            chart_nonres = nonres_comp.head(top_n2)
+            fig_nonres = px.bar(
+                chart_nonres,
+                x="시공업체",
+                y="연간총",
+                text="추정 연간사용량(m³)",
+            )
+            fig_nonres.update_traces(textposition="outside")
+            fig_nonres.update_layout(
+                xaxis_title="시공업체",
+                yaxis_title="가정용외 추정 연간사용량(m³)",
+                margin=dict(l=10, r=10, t=40, b=10),
+            )
+            st.plotly_chart(fig_nonres, use_container_width=True)
+
+    # ── 가정용외 용도별 분석 ───────────────────────────
+    with sub_tab3:
+        st.markdown("##### 🐻 가정용외 용도별 1위 시공업체")
+
+        type_disp = type_summary[type_summary["용도"] != "단독주택"].copy()
+        if type_disp.empty:
+            st.info("가정용외 용도 데이터가 없습니다.")
+        else:
+            type_disp["1위 연간사용량(m³)"] = type_disp[
+                "연간사용량_추정"
+            ].map(fmt_int)
+            type_disp["1위 전수(전)"] = type_disp["전수"].map(
+                lambda x: f"{int(x):,}"
+            )
+            type_disp = type_disp.rename(
+                columns={
+                    "시공업체": "1위 시공업체",
+                }
+            )
+
+            st.dataframe(
+                type_disp[
+                    ["용도", "1위 시공업체", "1위 연간사용량(m³)", "1위 전수(전)"]
+                ],
                 use_container_width=True,
                 hide_index=True,
             )
+
+            st.markdown("---")
+            st.markdown("##### 🐼 가정용외 용도별 시공업체 순위")
+
+            type_list_nonres = sorted(type_disp["용도"].unique().tolist())
+            selected_type = st.selectbox(
+                "용도 선택 (가정용외)", type_list_nonres
+            )
+
+            sub = usage_by_type[
+                usage_by_type["용도"] == selected_type
+            ].copy()
+            sub = sub.sort_values("연간사용량_추정", ascending=False)
+            sub["순위"] = np.arange(1, len(sub) + 1)
+            sub["연간총"] = sub["연간사용량_추정"]
+            sub["추정 연간사용량(m³)"] = sub["연간총"].map(fmt_int)
+            sub["전수(전)"] = sub["전수"].map(lambda x: f"{int(x):,}")
+
+            st.dataframe(
+                sub[["순위", "시공업체", "추정 연간사용량(m³)", "전수(전)"]],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "순위": st.column_config.NumberColumn("순위", width="small"),
+                },
+            )
+
+            top_n_type = min(15, sub.shape[0])
+            chart_type = sub.head(top_n_type)
+            fig_type = px.bar(
+                chart_type,
+                x="시공업체",
+                y="연간총",
+                text="추정 연간사용량(m³)",
+            )
+            fig_type.update_traces(textposition="outside")
+            fig_type.update_layout(
+                xaxis_title="시공업체",
+                yaxis_title=f"{selected_type} 추정 연간사용량(m³)",
+                margin=dict(l=10, r=10, t=40, b=10),
+            )
+            st.plotly_chart(fig_type, use_container_width=True)
+
+            # 영업용 상세 리스트 (시공업체별 시공 내용)
+            if selected_type == "영업용":
+                st.markdown("---")
+                st.markdown("##### 🐻‍❄️ 영업용 상세 리스트 (시공업체별 시공 내역)")
+
+                company_list = sub["시공업체"].tolist()
+                selected_company_sales = st.selectbox(
+                    "영업용 시공업체 선택", company_list
+                )
+
+                detail = df_proc[
+                    (df_proc["용도"] == "영업용")
+                    & (df_proc["시공업체"] == selected_company_sales)
+                ].copy()
+
+                if detail.empty:
+                    st.info("선택한 시공업체의 영업용 시공 내역이 없습니다.")
+                else:
+                    detail["연간사용량_추정(m³)"] = detail[
+                        "연간사용량_추정"
+                    ].map(fmt_int)
+                    detail_cols = [
+                        "계량기번호",
+                        "고객명",
+                        "주소",
+                        "자체업종명",
+                        "연간사용량_추정(m³)",
+                    ]
+                    exist_cols = [c for c in detail_cols if c in detail.columns]
+                    st.dataframe(
+                        detail[exist_cols],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
 
 # --------------------------------------------------
 # 탭 3 : 업체별 용도 분석
