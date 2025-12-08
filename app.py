@@ -32,7 +32,7 @@ SINGLE_DETACHED_MONTHLY_AVG = {
     12: 55,
 }
 
-# 포상 기준 (연간 10전 이상, 연간 10만 m3 이상)
+# 포상 기준 (연간 10전 이상, 연간 10만 m³ 이상)
 MIN_METERS = 10        # 연간 10전 이상
 MIN_ANNUAL = 100_000   # 연간 100,000 m³ 이상
 
@@ -46,7 +46,7 @@ def fmt_int(x: float) -> str:
 
 
 def get_month_cols(df: pd.DataFrame):
-    """202501, 202412 처럼 숫자형 연월 컬럼만 추출"""
+    """연월(YYYYMM) 숫자형 컬럼만 추출"""
     return [c for c in df.columns if isinstance(c, (int, np.integer))]
 
 
@@ -70,15 +70,17 @@ def load_raw(path: Path) -> pd.DataFrame:
 def preprocess(df_raw: pd.DataFrame):
     """
     사용 예정량 산정 로직
+
       1) 업종: 가스시공업 제1종만 사용
       2) 자체업종명: 아파트 제외
       3) 연립/다세대 → 용도 '단독주택' 으로 변경
-      4) 단독주택:
-         - 월 사용량이 NaN 또는 0이면 단독주택 월평균으로 치환
-         - 1~12월 합산 = 연간사용량_추정
-      5) 가정용외(단독·공동 제외 나머지 용도):
-         - 사용이 있는 달만 평균(월평균) 계산
-         - 월평균 × 12개월 = 연간사용량_추정
+      4) 가정용(단독주택):
+         - 월 사용량이 NaN 또는 0이면 단독주택 월평균표로 강제 치환
+         - 치환된 1~12월을 그대로 합산 → 연간사용량_추정
+      5) 가정용 외:
+         - 용도에서 단독주택을 제외한 나머지
+         - 월별 값 중 숫자가 있는 달만 골라 평균(= 합계 / 값이 있는 달 수)
+         - 월평균 × 12개월 → 연간사용량_추정
     """
     df = df_raw.copy()
 
@@ -103,26 +105,27 @@ def preprocess(df_raw: pd.DataFrame):
     def compute_annual(row):
         usage = row[month_cols].astype(float)
 
-        # --- 가정용: 단독주택 ---
+        # ── 가정용: 단독주택 ─────────────────────
         if row["용도"] == "단독주택":
             for col in month_cols:
                 base = detached_avg_by_col.get(col)
                 v = usage[col]
-                # 빈칸(NaN) 또는 0 → 단독주택 월평균으로 치환
+                # 빈칸(NaN) 또는 0 → 단독주택 월평균으로 강제 치환
                 if pd.isna(v) or v == 0:
                     if not pd.isna(base):
                         usage[col] = base
             return float(usage.sum())
 
-        # --- 가정용외: 단독·공동 제외 나머지 ---
+        # ── 가정용 외: 단독주택 제외 나머지 ───────
         else:
-            # 월평균: 사용이 있는 달만 사용
-            vals = usage.replace(0, np.nan).dropna()
+            # 값이 있는 달만 사용(블랭크만 제외, 0은 그대로 둠)
+            vals = usage.dropna()
             if len(vals) == 0:
                 return 0.0
-            monthly_avg = float(vals.mean())
-            return monthly_avg * 12.0
+            monthly_avg = float(vals.mean())  # 예: 3달 값 있으면 /3
+            return monthly_avg * 12.0        # 월평균 × 12개월
 
+    # 먼저 가정용/가정용외 구분된 상태에서 계량기별 연간 사용량 계산
     df["연간사용량_추정"] = df.apply(compute_annual, axis=1)
 
     # 대분류(설명용): 가정용 vs 가정용외
@@ -571,7 +574,6 @@ with tab_type:
                     & (df_proc["시공업체"] == selected_company_sales)
                 ].copy()
 
-                # 연간사용량 기준 내림차순 정렬 + 0 사용량 제거
                 if not detail.empty:
                     detail = detail[detail["연간사용량_추정"] > 0]
                     detail = detail.sort_values(
@@ -670,10 +672,10 @@ with tab_raw:
     )
 
     st.caption(
-        "- 분석 대상은 가스시공업 **제1종** 시공업체입니다.\n"
-        "- 아파트(자체업종명)는 계산에서 제외되었습니다.\n"
-        "- 연립주택·다세대주택은 용도를 단독주택으로 변경하여 계산했습니다.\n"
-        "- **가정용(단독주택)** 은 월 사용량의 빈칸·0을 단독주택 월평균(2024년 표)으로 채운 뒤 1~12월 합산하여 연간 사용량을 산정했습니다.\n"
-        "- **가정용외**는 용도에서 단독주택·공동주택을 제외한 나머지에 대해, 사용이 있는 달의 평균 사용량(월평균)에 12개월을 곱해 연간 사용량을 추정했습니다.\n"
-        "- 포상 기준은 연간 신규계량기 수 10전 이상, 추정 연간사용량 100,000 m³ 이상입니다."
+        "- 분석 대상은 가스시공업 **제1종** 시공업체.\n"
+        "- 아파트(자체업종명)는 계산에서 제외.\n"
+        "- 연립주택·다세대주택은 용도를 단독주택으로 변경하여 계산.\n"
+        "- **가정용(단독주택)** 은 월 사용량의 블랭크·0을 단독주택 월평균표로 채운 뒤 1~12월 합계로 연간 사용량 산정.\n"
+        "- **가정용 외**는 단독주택을 제외한 나머지 용도에 대해, 값이 있는 달의 평균(합계 / 값이 있는 달 수)에 12개월을 곱해 연간 사용량을 추정.\n"
+        "- 포상 기준은 연간 신규계량기 수 10전 이상, 추정 연간사용량 100,000 m³ 이상."
     )
