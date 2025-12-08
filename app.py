@@ -1,10 +1,10 @@
+# app.py ─ 도시가스 신규계량기 사용량 기반 우수 시공업체 평가 (수정본)
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-
 
 # --------------------------------------------------
 # 기본 설정
@@ -14,18 +14,17 @@ st.set_page_config(
     layout="wide",
 )
 
-# 모든 표 가운데 정렬용 전역 CSS
+# 모든 표 가운데 정렬용 CSS (st.dataframe 전역 적용)
 st.markdown(
     """
-    <style>
-    [data-testid="stDataFrame"] table td,
-    [data-testid="stDataFrame"] table th {
-        text-align: center !important;
-        vertical-align: middle !important;
-        justify-content: center !important;
-    }
-    </style>
-    """,
+<style>
+/* st.dataframe 헤더/셀 가운데 정렬 */
+[data-testid="stDataFrame"] div[role="columnheader"],
+[data-testid="stDataFrame"] div[role="gridcell"] {
+    justify-content: center !important;
+}
+</style>
+""",
     unsafe_allow_html=True,
 )
 
@@ -48,8 +47,8 @@ SINGLE_DETACHED_MONTHLY_AVG = {
 }
 
 # 포상 기준 (연간 10전 이상, 연간 10만 m³ 이상)
-MIN_METERS = 10        # 연간 10전 이상
-MIN_ANNUAL = 100_000   # 연간 100,000 m³ 이상
+MIN_METERS = 10  # 연간 10전 이상
+MIN_ANNUAL = 100_000  # 연간 100,000 m³ 이상
 
 
 # --------------------------------------------------
@@ -57,7 +56,7 @@ MIN_ANNUAL = 100_000   # 연간 100,000 m³ 이상
 # --------------------------------------------------
 def fmt_int(x: float) -> str:
     """정수 + 천단위 콤마"""
-    return f"{int(round(x)):,}"
+    return f"{int(round(float(x))):,}"
 
 
 def get_month_cols(df: pd.DataFrame):
@@ -74,14 +73,35 @@ def build_detached_avg_by_col(month_cols):
     return mapping
 
 
+def html_center_and_highlight(df_disp: pd.DataFrame, eligible_names: set) -> str:
+    """
+    전체 업체 순위 표용: 가운데 정렬 + 포상 기준 충족업체 하이라이트.
+    Styler → HTML 문자열로 변환해서 st.markdown에 넣기.
+    """
+    def _row_style(row: pd.Series):
+        if row["시공업체명"] in eligible_names:
+            return ["background-color: #FFF3CD"] * len(row)  # 연노랑
+        return [""] * len(row)
+
+    styler = (
+        df_disp.style
+        .set_properties(**{"text-align": "center"})
+        .set_table_styles(
+            [dict(selector="th", props=[("text-align", "center")])]
+        )
+        .apply(_row_style, axis=1)
+    )
+    return styler.to_html()
+
+
+# --------------------------------------------------
+# 데이터 불러오기 & 전처리
+# --------------------------------------------------
 @st.cache_data
 def load_raw(path: Path) -> pd.DataFrame:
     return pd.read_excel(path)
 
 
-# --------------------------------------------------
-# 데이터 전처리
-# --------------------------------------------------
 def preprocess(df_raw: pd.DataFrame):
     """
     사용 예정량 산정 로직
@@ -89,7 +109,7 @@ def preprocess(df_raw: pd.DataFrame):
       1) 업종: 가스시공업 제1종만 사용
       2) 자체업종명: 아파트 제외
       3) 연립/다세대 → 용도 '단독주택' 으로 변경
-      4) 가정용(단독주택):
+      4) 가정용(단독주택, 공동주택 제외):
          - 월 사용량이 NaN 또는 0이면 단독주택 월평균표로 강제 치환
          - 치환된 1~12월을 그대로 합산 → 연간사용량_추정
       5) 가정용 외:
@@ -140,11 +160,14 @@ def preprocess(df_raw: pd.DataFrame):
             monthly_avg = float(vals.mean())  # 예: 3달 값 있으면 /3
             return monthly_avg * 12.0        # 월평균 × 12개월
 
-    # 먼저 가정용/가정용외 구분된 상태에서 계량기별 연간 사용량 계산
     df["연간사용량_추정"] = df.apply(compute_annual, axis=1)
 
-    # 대분류(설명용): 가정용 vs 가정용외
-    df["대분류"] = np.where(df["용도"] == "단독주택", "가정용(단독주택)", "가정용외")
+    # 대분류(설명용): 가정용(공동주택 제외) vs 가정용외
+    df["대분류"] = np.where(
+        df["용도"] == "단독주택",
+        "가정용(공동주택 제외)",
+        "가정용외",
+    )
 
     # 시공업체별 집계 (전체 기준)
     agg = (
@@ -154,14 +177,18 @@ def preprocess(df_raw: pd.DataFrame):
             연간사용량합계=("연간사용량_추정", "sum"),
         )
     )
-    agg["계량기당_평균연간사용량"] = agg["연간사용량합계"] / agg["신규계량기수"]
+    agg["계량기당_평균연간사용량"] = (
+        agg["연간사용량합계"] / agg["신규계량기수"].replace(0, np.nan)
+    )
 
     # 포상 기준 충족 업체 (10전 이상 + 연간 10만 m³ 이상)
-    eligible = agg[
+    eligible_mask = (
         (agg["신규계량기수"] >= MIN_METERS)
         & (agg["연간사용량합계"] >= MIN_ANNUAL)
-    ].copy()
+    )
+    eligible = agg[eligible_mask].copy()
     eligible = eligible.sort_values("연간사용량합계", ascending=False)
+    eligible["순위"] = np.arange(1, len(eligible) + 1)
 
     # 업체 × 용도별 사용량 + 전수 (전체)
     usage_by_type = (
@@ -239,7 +266,7 @@ with col3:
     )
 
 tab_rank, tab_type, tab_detail = st.tabs(
-    ["업체별 순위", "대분류·용도별 분석", "업체별 용도 분석"]
+    ["업체별 순위", "용도별 분석", "업체별 용도 분석"]
 )
 
 # --------------------------------------------------
@@ -248,62 +275,50 @@ tab_rank, tab_type, tab_detail = st.tabs(
 with tab_rank:
     st.subheader("📈 포상 기준 + 전체 업체 순위 (연간 사용량 기준)")
 
-    # 전체 업체 순위 (포상 기준 미적용 + 하이라이트)
-    all_rank = agg_all.sort_values(
-        "연간사용량합계", ascending=False
-    ).reset_index()
+    # 전체 업체 순위 (연간사용량 기준)
+    all_rank = (
+        agg_all.sort_values("연간사용량합계", ascending=False)
+        .reset_index()
+        .copy()
+    )
     all_rank["순위"] = np.arange(1, len(all_rank) + 1)
-    all_rank["신규계량기 수(전)"] = all_rank["신규계량기수"].astype(int)
+    all_rank["시공업체명"] = all_rank["시공업체"]
+    all_rank["신규계량기 수(전)"] = all_rank["신규계량기수"]
     all_rank["추정 연간사용량 합계(m³)"] = all_rank["연간사용량합계"].map(fmt_int)
-    all_rank["포상기준충족"] = all_rank["시공업체"].isin(eligible.index)
 
     disp_cols = [
         "순위",
-        "시공업체",
+        "시공업체명",
         "신규계량기 수(전)",
         "추정 연간사용량 합계(m³)",
     ]
+    eligible_set = set(eligible.index.tolist())
 
-    mask = all_rank["포상기준충족"].values
+    html_table = html_center_and_highlight(all_rank[disp_cols], eligible_set)
+    st.markdown(html_table, unsafe_allow_html=True)
 
-    def highlight_award(row):
-        idx = row.name
-        color = "#fff7d6" if mask[idx] else ""
-        return [color] * len(row)
+    # 상위 업체 바 차트 (포상 기준 충족 업체만)
+    st.markdown("---")
+    st.markdown("#### 📊 포상 기준 충족 업체 상위 사용량")
 
-    styled_all_rank = all_rank[disp_cols].style.apply(highlight_award, axis=1)
+    if eligible.empty:
+        st.info("포상 기준(10전 이상 & 연간 100,000 m³ 이상)을 만족하는 업체가 없습니다.")
+    else:
+        chart_df = (
+            eligible.sort_values("연간사용량합계", ascending=False)
+            .reset_index()
+            .copy()
+        )
+        chart_df["시공업체명"] = chart_df["시공업체"]
+        chart_df["연간총"] = chart_df["연간사용량합계"]
+        chart_df["라벨"] = chart_df["연간총"].map(fmt_int)
 
-    st.dataframe(
-        styled_all_rank,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "순위": st.column_config.NumberColumn("순위", width=60),
-        },
-    )
-
-    st.caption(
-        "※ 노란색으로 표시된 행이 **포상 기준(연간 10전 이상 & 100,000 m³ 이상)** 을 충족한 업체."
-    )
-
-    # 포상 기준 충족 업체만 바 차트로 표시
-    if not eligible.empty:
-        eligible_sorted = eligible.sort_values(
-            "연간사용량합계", ascending=False
-        ).reset_index()
-        eligible_sorted["연간총"] = eligible_sorted["연간사용량합계"]
-        eligible_sorted["추정 연간사용량 합계(m³)"] = eligible_sorted[
-            "연간총"
-        ].map(fmt_int)
-
-        top_n = min(20, eligible_sorted.shape[0])
-        chart_df = eligible_sorted.head(top_n)
-
+        top_n = min(20, chart_df.shape[0])
         fig = px.bar(
-            chart_df,
-            x="시공업체",
+            chart_df.head(top_n),
+            x="시공업체명",
             y="연간총",
-            text="추정 연간사용량 합계(m³)",
+            text="라벨",
         )
         fig.update_traces(textposition="outside")
         fig.update_layout(
@@ -315,47 +330,56 @@ with tab_rank:
 
     # 추가 분석: 상위 10개 업체 집중도
     st.markdown("---")
-    st.markdown("#### 📊 추가 분석: 상위 업체 집중도")
+    st.markdown("#### 📌 추가 분석: 상위 업체 집중도")
     st.markdown(
-        f"- 전체 1종 시공업체의 추정 연간사용량 합계는 **{fmt_int(total_usage_all)} m³**.\n"
-        f"- 이 중 상위 10개 업체가 차지하는 비중은 약 **{top10_share * 100:,.1f}%**."
+        f"- 전체 1종 시공업체의 추정 연간사용량 합계는 **{fmt_int(total_usage_all)} m³** 입니다.\n"
+        f"- 이 중 상위 10개 업체가 차지하는 비중은 약 **{top10_share * 100:,.1f}%** 입니다."
     )
 
 # --------------------------------------------------
-# 탭 2 : 대분류·용도별 분석
+# 탭 2 : 용도별 분석 (가정용 vs 가정용외)
 # --------------------------------------------------
 with tab_type:
     st.subheader("📊 대분류별 사용량 요약 (가정용 vs 가정용외)")
 
-    # 가정용(단독주택만, 공동주택 제외) / 가정용외(단독·공동 제외 나머지)
-    df_home = df_proc[df_proc["용도"] == "단독주택"].copy()
-    df_nonres_rows = df_proc[
-        (df_proc["용도"] != "단독주택") & (df_proc["용도"] != "공동주택")
-    ].copy()
+    # 가정용(공동주택 제외) / 가정용외
+    df_home = df_proc[df_proc["대분류"] == "가정용(공동주택 제외)"].copy()
+    df_nonres_rows = df_proc[df_proc["대분류"] == "가정용외"].copy()
 
-    total_annual = df_proc["연간사용량_추정"].sum()
+    total_usage_volume = df_proc["연간사용량_추정"].sum()
 
-    rows = [
-        {
-            "대분류": "가정용(공동주택 제외)",
-            "계량기 수(전)": df_home["계량기번호"].nunique(),
-            "추정 연간사용량(m³)": df_home["연간사용량_추정"].sum(),
-        },
-        {
-            "대분류": "가정용외",
-            "계량기 수(전)": df_nonres_rows["계량기번호"].nunique(),
-            "추정 연간사용량(m³)": df_nonres_rows["연간사용량_추정"].sum(),
-        },
-    ]
-    for r in rows:
-        r["비중(%)"] = (
-            (r["추정 연간사용량(m³)"] / total_annual * 100) if total_annual > 0 else 0.0
+    rows = []
+    for label, subset in [
+        ("가정용(공동주택 제외)", df_home),
+        ("가정용외", df_nonres_rows),
+    ]:
+        meters = subset["계량기번호"].nunique()
+        usage = subset["연간사용량_추정"].sum()
+        share = (usage / total_usage_volume * 100) if total_usage_volume > 0 else 0.0
+        rows.append(
+            {
+                "대분류": label,
+                "계량기 수(전)": meters,
+                "추정 연간사용량(m³)": usage,
+                "전체 대비 비율(%)": share,
+            }
         )
+
+    rows.append(
+        {
+            "대분류": "합계",
+            "계량기 수(전)": df_proc["계량기번호"].nunique(),
+            "추정 연간사용량(m³)": total_usage_volume,
+            "전체 대비 비율(%)": 100.0,
+        }
+    )
 
     big_df = pd.DataFrame(rows)
     big_df["계량기 수(전)"] = big_df["계량기 수(전)"].map(lambda x: f"{int(x):,}")
     big_df["추정 연간사용량(m³)"] = big_df["추정 연간사용량(m³)"].map(fmt_int)
-    big_df["비중(%)"] = big_df["비중(%)"].map(lambda v: f"{v:,.1f}")
+    big_df["전체 대비 비율(%)"] = big_df["전체 대비 비율(%)"].map(
+        lambda v: f"{float(v):,.1f}"
+    )
 
     st.dataframe(
         big_df,
@@ -367,7 +391,7 @@ with tab_type:
     st.subheader("📌 대분류별·용도별 시공업체 순위")
 
     sub_tab1, sub_tab2, sub_tab3 = st.tabs(
-        ["가정용(공동제외) 순위", "가정용외 순위", "가정용외 용도별 분석"]
+        ["가정용(단독주택) 순위", "가정용외 순위", "가정용외 용도별 분석"]
     )
 
     # ── 가정용(단독주택) 순위 ───────────────────────────
@@ -387,7 +411,7 @@ with tab_type:
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "순위": st.column_config.NumberColumn("순위", width=60),
+                    "순위": st.column_config.NumberColumn("순위", width="small"),
                 },
             )
 
@@ -421,13 +445,13 @@ with tab_type:
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "순위": st.column_config.NumberColumn("순위", width=60),
+                    "순위": st.column_config.NumberColumn("순위", width="small"),
                 },
             )
 
-    # ── 가정용외 용도별 분석 ───────────────────────────
+    # ── 가정용외 용도별 분석 + 상세 리스트 ─────────────────
     with sub_tab3:
-        st.markdown("##### 📌 가정용외 용도별 1위 시공업체")
+        st.markdown("##### 📍 가정용외 용도별 1위 시공업체")
 
         type_summary_nonres = (
             usage_by_type_nonres.groupby("용도")
@@ -456,7 +480,9 @@ with tab_type:
                 lambda x: f"{int(x):,}"
             )
             type_disp = type_disp.rename(
-                columns={"시공업체": "1위 시공업체"}
+                columns={
+                    "시공업체": "1위 시공업체",
+                }
             )
 
             st.dataframe(
@@ -468,7 +494,7 @@ with tab_type:
             )
 
             st.markdown("---")
-            st.markdown("##### 📎 가정용외 용도별 시공업체 순위")
+            st.markdown("##### 📌 가정용외 용도별 시공업체 순위")
 
             type_list_nonres = sorted(type_disp["용도"].unique().tolist())
             selected_type = st.selectbox(
@@ -489,42 +515,34 @@ with tab_type:
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "순위": st.column_config.NumberColumn("순위", width=60),
+                    "순위": st.column_config.NumberColumn("순위", width="small"),
                 },
             )
 
-            # 선택한 용도 상세 리스트 (모든 신규계량기)
+            # 선택 용도별 상세 리스트 (계량기 단위)
             st.markdown("---")
-            st.markdown("##### 📋 선택한 용도 신규계량기 상세 리스트")
+            st.markdown("##### 🔍 용도별 상세 리스트")
 
-            detail = df_proc[
-                (df_proc["용도"] == selected_type)
-                & (df_proc["용도"] != "단독주택")
-                & (df_proc["용도"] != "공동주택")
-            ].copy()
+            detail = df_proc[df_proc["용도"] == selected_type].copy()
+            detail = detail.sort_values(
+                "연간사용량_추정", ascending=False
+            )
+            detail["연간사용량_추정(m³)"] = detail["연간사용량_추정"].map(
+                fmt_int
+            )
+
+            detail_cols = [
+                "계량기번호",
+                "고객명",
+                "주소",
+                "자체업종명",
+                "연간사용량_추정(m³)",
+            ]
+            exist_cols = [c for c in detail_cols if c in detail.columns]
 
             if detail.empty:
-                st.info("해당 용도의 신규계량기 상세 내역이 없습니다.")
+                st.info("선택한 용도의 상세 내역이 없습니다.")
             else:
-                detail = detail.sort_values(
-                    "연간사용량_추정", ascending=False
-                )
-                detail["연간사용량_추정(m³)"] = detail["연간사용량_추정"].map(
-                    fmt_int
-                )
-
-                detail_cols = [
-                    "계량기번호",
-                    "시공업체",
-                    "고객명",
-                    "주소",
-                    "자체업종명",
-                    "연간사용량_추정(m³)",
-                ]
-                exist_cols = [
-                    c for c in detail_cols if c in detail.columns
-                ]
-
                 st.dataframe(
                     detail[exist_cols],
                     use_container_width=True,
@@ -540,9 +558,7 @@ with tab_detail:
     if eligible.empty:
         st.info("포상 기준을 만족하는 업체가 없어서 상세 분석 대상이 없습니다.")
     else:
-        target_companies = eligible.sort_values(
-            "연간사용량합계", ascending=False
-        ).index.tolist()
+        target_companies = eligible.index.tolist()
         selected_company = st.selectbox(
             "시공업체 선택 (포상 기준 충족 업체 기준)",
             target_companies,
