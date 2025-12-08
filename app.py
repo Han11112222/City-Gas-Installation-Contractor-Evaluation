@@ -68,6 +68,7 @@ def center_style(df: pd.DataFrame, highlight_fn=None):
     if highlight_fn is not None:
         styler = styler.apply(highlight_fn, axis=1)
 
+    # 전체 숫자/텍스트 중앙정렬
     styler = styler.set_properties(**{"text-align": "center"})
     styler = styler.set_table_styles(
         [
@@ -217,6 +218,14 @@ if uploaded is not None:
 else:
     raw_df = load_raw(DATA_FILE)
 
+# 아파트 포함 전체 신규계량기수(1종, 사용여부 Y만) 계산
+total_meters_incl_apt = None
+if {"업종", "계량기번호"}.issubset(raw_df.columns):
+    df_meter = raw_df[raw_df["업종"] == "가스시공업 제1종"].copy()
+    if "사용여부" in df_meter.columns:
+        df_meter = df_meter[df_meter["사용여부"] == "Y"].copy()
+    total_meters_incl_apt = df_meter["계량기번호"].nunique()
+
 (
     df_proc,
     agg_all,
@@ -233,7 +242,7 @@ top10_usage = all_rank_for_share["연간사용량합계"].head(10).sum()
 top10_share = top10_usage / total_usage_all if total_usage_all > 0 else 0.0
 
 # 상단 KPI
-col1, col2, col3 = st.columns(3)
+col1, col2, col3, col4 = st.columns(4)
 with col1:
     st.metric("전체 시공업체 수 (1종)", f"{agg_all.shape[0]:,} 개")
 with col2:
@@ -243,6 +252,12 @@ with col3:
         "전체 신규계량기 수 (아파트 제외)",
         f"{df_proc['계량기번호'].nunique():,} 전",
     )
+with col4:
+    if total_meters_incl_apt is not None:
+        st.metric(
+            "전체 신규계량기 수 (아파트 포함)",
+            f"{total_meters_incl_apt:,} 전",
+        )
 
 tab_rank, tab_type, tab_detail = st.tabs(
     ["업체별 순위", "용도별 분석", "업체별 용도 분석"]
@@ -278,7 +293,8 @@ with tab_rank:
         use_container_width=True,
         hide_index=True,
         column_config={
-            "순위": st.column_config.NumberColumn("순위", width="small"),
+            # 순위 컬럼 폭을 줄이고 중앙정렬 유지 (NumberColumn → Column)
+            "순위": st.column_config.Column("순위", width="small"),
         },
     )
 
@@ -400,7 +416,7 @@ with tab_type:
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "순위": st.column_config.NumberColumn("순위", width="small"),
+                    "순위": st.column_config.Column("순위", width="small"),
                 },
             )
 
@@ -453,7 +469,7 @@ with tab_type:
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "순위": st.column_config.NumberColumn("순위", width="small"),
+                    "순위": st.column_config.Column("순위", width="small"),
                 },
             )
 
@@ -547,7 +563,7 @@ with tab_type:
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "순위": st.column_config.NumberColumn("순위", width="small"),
+                    "순위": st.column_config.Column("순위", width="small"),
                 },
             )
 
