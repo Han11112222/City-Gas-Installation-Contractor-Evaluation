@@ -56,11 +56,12 @@ def build_detached_avg_by_col(month_cols):
     for col in month_cols:
         month_num = int(str(col)[-2:])  # 202501 -> 1, 202412 -> 12
         mapping[col] = SINGLE_DETACHED_MONTHLY_AVG.get(month_num, np.nan)
+        # 찾지 못하면 NaN
     return mapping
 
 
-def center_styler(styler: pd.io.formats.style.Styler):
-    """표 전체 가운데 정렬"""
+def center_styler(styler):
+    """표 전체 가운데 정렬용 공통 스타일 함수"""
     styler = styler.set_table_styles(
         [dict(selector="th", props=[("text-align", "center")])]
     ).set_properties(**{"text-align": "center"})
@@ -133,7 +134,7 @@ def preprocess(df_raw: pd.DataFrame):
             monthly_avg = float(vals.mean())  # 예: 3달 값 있으면 /3
             return monthly_avg * 12.0        # 월평균 × 12개월
 
-    # 먼저 가정용/가정용외 구분된 상태에서 계량기별 연간 사용량 계산
+    # 계량기별 연간 사용량 계산
     df["연간사용량_추정"] = df.apply(compute_annual, axis=1)
 
     # 대분류(설명용): 가정용 vs 가정용외
@@ -261,9 +262,10 @@ with tab_rank:
         )
         rank_df = rank_df.rename(columns={"시공업체": "시공업체명"})
 
-        # 표시용 DataFrame
-        disp = rank_df[["순위", "시공업체명", "신규계량기수",
-                        "연간사용량합계", "계량기당_평균연간사용량"]].copy()
+        disp = rank_df[
+            ["순위", "시공업체명", "신규계량기수",
+             "연간사용량합계", "계량기당_평균연간사용량"]
+        ].copy()
         disp = disp.rename(
             columns={
                 "신규계량기수": "신규계량기 수(전)",
@@ -589,7 +591,6 @@ with tab_type:
                 }
             )
 
-            # 포상 기준 충족 업체 하이라이트 (전수·연간사용량 기준)
             def highlight_eligible_type(row):
                 cond = (row["전수(전)"] >= MIN_METERS) and (
                     row["추정 연간사용량(m³)"] >= MIN_ANNUAL
@@ -630,7 +631,7 @@ with tab_type:
             )
             st.plotly_chart(fig_type, use_container_width=True)
 
-            # 선택 용도 상세 리스트 (모든 용도 공통)
+            # 선택 용도 상세 리스트
             st.markdown("---")
             st.markdown("📄 선택 용도별 상세 리스트 (시공업체별 시공 내역)")
 
@@ -644,7 +645,6 @@ with tab_type:
                 & (df_proc["시공업체"] == selected_company_type)
             ].copy()
 
-            # 전체 리스트 (연간사용량 0도 포함), 연간사용량 내림차순
             if not detail.empty:
                 detail = detail.sort_values("연간사용량_추정", ascending=False)
 
