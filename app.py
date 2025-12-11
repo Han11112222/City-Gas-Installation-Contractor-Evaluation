@@ -1,4 +1,5 @@
 from pathlib import Path
+from io import BytesIO
 
 import numpy as np
 import pandas as pd
@@ -68,7 +69,6 @@ def center_style(df: pd.DataFrame, highlight_fn=None):
     if highlight_fn is not None:
         styler = styler.apply(highlight_fn, axis=1)
 
-    # 전체 숫자/텍스트 중앙정렬
     styler = styler.set_properties(**{"text-align": "center"})
     styler = styler.set_table_styles(
         [
@@ -132,7 +132,6 @@ def preprocess(df_raw: pd.DataFrame):
             for col in month_cols:
                 base = detached_avg_by_col.get(col)
                 v = usage[col]
-                # 빈칸(NaN) 또는 0 → 단독주택 월평균으로 강제 치환
                 if pd.isna(v) or v == 0:
                     if not pd.isna(base):
                         usage[col] = base
@@ -140,12 +139,11 @@ def preprocess(df_raw: pd.DataFrame):
 
         # ── 가정용 외: 단독주택 제외 나머지 ───────
         else:
-            # 값이 있는 달만 사용(블랭크만 제외, 0은 그대로 둠)
             vals = usage.dropna()
             if len(vals) == 0:
                 return 0.0
-            monthly_avg = float(vals.mean())  # 예: 3달 값 있으면 /3
-            return monthly_avg * 12.0        # 월평균 × 12개월
+            monthly_avg = float(vals.mean())
+            return monthly_avg * 12.0
 
     df["연간사용량_추정"] = df.apply(compute_annual, axis=1)
 
@@ -194,6 +192,69 @@ def preprocess(df_raw: pd.DataFrame):
     )
 
     return df, agg, eligible, usage_by_type, usage_by_type_nonres, month_cols
+
+
+# --------------------------------------------------
+# 평가점수표(1~3-2항 + 2-3항 + 총점) 로더
+#   - 같은 엑셀에 들어있는 시공업체 평가점수 시트 사용
+#   - 컬럼: 최소 '구분', '총점', '2-3' 이 있어야 함
+# --------------------------------------------------
+def load_eval_score_table(
+    uploaded_file, base_path: Path
+) -> pd.DataFrame | None:
+    """
+    - uploaded_file 이 있으면 그 파일에서 시트를 탐색
+    - 없으면 기본 DATA_FILE 에서 시트를 탐색
+    - 시트 중 '구분'·'총점' 을 가지고 있고, '2-3' 으로 시작하는 컬럼이 있는 시트를 선택
+    """
+    try:
+        if uploaded_file is not None:
+            buf = BytesIO(uploaded_file.getvalue())
+            xls = pd.ExcelFile(buf)
+        else:
+            xls = pd.ExcelFile(base_path)
+    except Exception:
+        return None
+
+    target_basic = {"구분", "총점"}
+    chosen = None
+
+    for sheet in xls.sheet_names:
+        df_tmp = xls.parse(sheet)
+        cols = set(map(str, df_tmp.columns))
+        if not target_basic.issubset(cols):
+            continue
+
+        col_23 = None
+        for c in df_tmp.columns:
+            name = str(c).replace(" ", "")
+            if name.startswith("2-3"):
+                col_23 = c
+                break
+        if col_23 is None:
+            continue
+
+        df_tmp = df_tmp.rename(columns={col_23: "2-3"})
+        chosen = df_tmp
+        break
+
+    if chosen is None:
+        return None
+
+    # 필요 컬럼만 정리 (없으면 있는 것만 사용)
+    keep_cols = [c for c in ["순번", "구분", "1-1", "2-1", "2-2", "2-3", "3-1", "3-2", "감점", "총점", "비고"] if c in chosen.columns]
+    df_eval = chosen[keep_cols].copy()
+
+    # 숫자형으로 정리
+    for c in ["1-1", "2-1", "2-2", "2-3", "3-1", "3-2", "감점", "총점"]:
+        if c in df_eval.columns:
+            df_eval[c] = pd.to_numeric(df_eval[c], errors="coerce")
+
+    df_eval = df_eval[df_eval["구분"].notna()].copy()
+    if "총점" in df_eval.columns:
+        df_eval = df_eval[df_eval["총점"].notna()]
+
+    return df_eval
 
 
 # --------------------------------------------------
@@ -293,7 +354,6 @@ with tab_rank:
         use_container_width=True,
         hide_index=True,
         column_config={
-            # 순위 컬럼 폭을 줄이고 중앙정렬 유지 (NumberColumn → Column)
             "순위": st.column_config.Column("순위", width="small"),
         },
     )
@@ -369,7 +429,6 @@ with tab_type:
     ]
     big_df = pd.DataFrame(rows)
 
-    # 비중 계산
     big_df["사용량 비중(%)"] = (
         big_df["추정 연간사용량(m³)"] / total_m3 * 100 if total_m3 > 0 else 0
     )
@@ -583,7 +642,6 @@ with tab_type:
             )
             st.plotly_chart(fig_type, use_container_width=True)
 
-            # ── 선택 용도별 상세 리스트 (계량기별 시공 내역) ─────────
             st.markdown("---")
             st.markdown(f"##### 🧾 {selected_type} 상세 리스트 (시공업체별 시공 내역)")
 
@@ -673,218 +731,158 @@ with tab_detail:
 
 
 # --------------------------------------------------
-# 탭 4 : 최종 분석 (본상/특별상 추천)
+# 탭 4 : 최종분석 – 종합점수 + 2-3항목(기존주택 비율) 기반 포상 추천
 # --------------------------------------------------
 with tab_final:
-    st.subheader("🏁 최종분석 – 종합점수 + 2-3항목(기존주택 비율) 기반 포상 추천")
+    st.subheader("※ 최종분석 – 종합점수 + 2-3항목(기존주택 비율) 기반 포상 추천")
 
     st.markdown(
         """
-- 별도의 **시공업체 평가점수표**(1-1~3-2, 감점, 총점 포함)를 업로드하면  
-  종합점수와 2-3항목(기존주택 개발 비율) 점수를 활용해 **본상/특별상 후보를 자동 추천**합니다.
-- 기존주택 비율은 이미 **평가기준 2-3항목 점수**로 반영되어 있으므로,  
-  이 탭에서는 별도 비율을 다시 계산하지 않고 **2-3 점수 컬럼**을 그대로 사용합니다.
+- 별도의 **시공업체 평가점수표(1-1~3-2, 감점, 총점 포함)** 를 엑셀에 넣어두면  
+  **총점 + 2-3항목(기존주택 개발 비율)** 점수를 활용해 **본상/특별상 후보**를 자동 추천한다.
+- 기존주택 비율은 이미 평가기준 2-3항목 점수로 반영되어 있으므로,  
+  이 탭에서는 별도 비율 산정 없이 **2-3 점수 컬럼**을 그대로 사용한다.
 """
     )
 
-    score_file = st.file_uploader(
-        "시공업체 평가점수표 업로드 (2-3항목, 총점 포함)", type=["xlsx"], key="score_file"
-    )
+    # 같은 엑셀 파일 안에서 평가점수표 시트 찾기
+    eval_df = load_eval_score_table(uploaded, DATA_FILE)
 
-    if score_file is None:
-        st.info("평가점수표 엑셀을 업로드하면 최종 분석 결과가 표시됩니다.")
+    if eval_df is None or eval_df.empty:
+        st.info(
+            "엑셀 파일에서 '구분', '2-3', '총점' 컬럼을 가진 평가점수표 시트를 찾지 못했어. "
+            "점수표 시트가 같은 파일 안에 있는지 확인해줘."
+        )
     else:
-        df_score = pd.read_excel(score_file)
+        # 전체 순위 (총점 기준)
+        eval_rank = eval_df.copy()
+        eval_rank = eval_rank.sort_values("총점", ascending=False)
+        eval_rank["전체순위"] = np.arange(1, len(eval_rank) + 1)
 
-        # 필수 키: 시공업체
-        if "시공업체" not in df_score.columns:
-            st.error("점수표에 '시공업체' 컬럼이 필요합니다.")
+        # 본상: 총점 1위
+        main_award_row = eval_rank.iloc[0]
+        main_company = str(main_award_row["구분"])
+        main_total = float(main_award_row["총점"])
+        main_23 = float(main_award_row["2-3"]) if "2-3" in eval_rank.columns else np.nan
+
+        # 특별상: 2-3점수(기존주택 비율) + 외식업(식당/프랜차이즈 등) 공급 실적
+        spec_df = eval_rank[["구분", "총점", "2-3"]].rename(columns={"구분": "시공업체"}).copy()
+
+        # 외식업 관련 용도: '식당', '음식점', '프랜차이즈' 포함
+        rest_rows = usage_by_type_nonres[
+            usage_by_type_nonres["용도"].str.contains("식당|음식점|프랜차이즈", na=False)
+        ].copy()
+        if not rest_rows.empty:
+            rest_agg = (
+                rest_rows.groupby("시공업체")["연간사용량_추정"]
+                .sum()
+                .reset_index(name="외식업_연간사용량")
+            )
+            spec_df = spec_df.merge(rest_agg, on="시공업체", how="left")
         else:
-            # 총점 컬럼 / 2-3항목 컬럼 자동 탐색
-            total_col = None
-            exist_col = None
-            for c in df_score.columns:
-                name = str(c)
-                if ("총점" in name) and total_col is None:
-                    total_col = c
-                if (("2-3" in name) or ("기존" in name)) and exist_col is None:
-                    exist_col = c
+            spec_df["외식업_연간사용량"] = np.nan
 
-            if total_col is None or exist_col is None:
-                msg = []
-                if total_col is None:
-                    msg.append("· '총점' 이 포함된 컬럼 이름이 필요합니다.")
-                if exist_col is None:
-                    msg.append("· '2-3' 또는 '기존' 이 포함된 컬럼 이름이 필요합니다.")
-                st.error("점수표 컬럼을 찾지 못했습니다.\n" + "\n".join(msg))
+        spec_df["외식업_연간사용량"] = spec_df["외식업_연간사용량"].fillna(0.0)
+
+        # 지수화 (0~1)
+        if spec_df["2-3"].max() > 0:
+            spec_df["기존주택지수"] = spec_df["2-3"] / spec_df["2-3"].max()
+        else:
+            spec_df["기존주택지수"] = 0.0
+
+        if spec_df["외식업_연간사용량"].max() > 0:
+            spec_df["외식업지수"] = (
+                spec_df["외식업_연간사용량"]
+                / spec_df["외식업_연간사용량"].max()
+            )
+        else:
+            spec_df["외식업지수"] = 0.0
+
+        # 특별상 종합지수: 기존주택 60%, 외식업 40%
+        spec_df["특별상지수"] = (
+            spec_df["기존주택지수"] * 0.6 + spec_df["외식업지수"] * 0.4
+        )
+
+        # 본상 업체는 특별상 후보에서 제외
+        spec_candidates = spec_df[spec_df["시공업체"] != main_company].copy()
+        special_row = spec_candidates.sort_values(
+            ["특별상지수", "2-3", "총점"], ascending=False
+        ).iloc[0]
+
+        special_company = str(special_row["시공업체"])
+        special_23 = float(special_row["2-3"])
+        special_rest = float(special_row["외식업_연간사용량"])
+        special_total = float(special_row["총점"])
+
+        # 전체 순위표 표시 (본상/특별상 색깔 표시)
+        disp_cols = []
+        for c in ["전체순위", "구분", "1-1", "2-1", "2-2", "2-3", "3-1", "3-2", "감점", "총점", "비고"]:
+            if c in eval_rank.columns:
+                disp_cols.append(c)
+        eval_display = eval_rank[disp_cols].copy()
+
+        def highlight_awards(row):
+            name = str(row["구분"])
+            if name == main_company:
+                color = "#FFF4CC"   # 본상: 연노랑
+            elif name == special_company:
+                color = "#D5F5E3"   # 특별상: 연초록
             else:
-                # 기본 집계(신규계량기수, 연간사용량)와 merge
-                base = agg_all.reset_index()[["시공업체", "신규계량기수", "연간사용량합계"]]
-                merged = df_score.merge(base, on="시공업체", how="left")
+                color = ""
+            return [f"background-color: {color}" if color else "" for _ in row]
 
-                # 영업용 사용량 집계 (가정용외 중 용도명에 '영업' 포함하는 건)
-                biz = (
-                    usage_by_type_nonres[
-                        usage_by_type_nonres["용도"].astype(str).str.contains("영업", na=False)
-                    ]
-                    .groupby("시공업체")
-                    .agg(영업용_사용량=("연간사용량_추정", "sum"))
-                    .reset_index()
-                )
-                merged = merged.merge(biz, on="시공업체", how="left")
-                merged["영업용_사용량"] = merged["영업용_사용량"].fillna(0.0)
+        styled_eval = center_style(eval_display, highlight_awards)
 
-                # 영업용 비중(%)
-                merged["영업용_비중(%)"] = np.where(
-                    merged["연간사용량합계"] > 0,
-                    merged["영업용_사용량"] / merged["연간사용량합계"] * 100,
-                    0.0,
-                )
+        st.markdown("#### 1) 평가기준 점수표 기반 전체 순위 (총점 기준)")
+        st.dataframe(
+            styled_eval,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "전체순위": st.column_config.Column("전체순위", width="small"),
+            },
+        )
 
-                # 총점 기준 순위
-                merged = merged.sort_values(total_col, ascending=False).reset_index(drop=True)
-                merged["총점순위"] = np.arange(1, len(merged) + 1)
+        # 포상 추천 요약
+        st.markdown("---")
+        st.markdown("#### 2) 포상 추천 결과")
 
-                # 요약표 표시
-                summary_cols = [
-                    "총점순위",
-                    "시공업체",
-                    total_col,
-                    exist_col,
-                    "신규계량기수",
-                    "연간사용량합계",
-                    "영업용_사용량",
-                    "영업용_비중(%)",
-                ]
-                disp_summary = merged[summary_cols].copy()
-                disp_summary = disp_summary.rename(
-                    columns={
-                        total_col: "총점",
-                        exist_col: "2-3항목(기존주택 비율) 점수",
-                        "연간사용량합계": "추정 연간사용량 합계(m³)",
-                    }
-                )
-
-                disp_summary["신규계량기수"] = disp_summary["신규계량기수"].map(
-                    lambda x: f"{int(x):,}"
-                )
-                disp_summary["추정 연간사용량 합계(m³)"] = disp_summary[
-                    "추정 연간사용량 합계(m³)"
-                ].map(fmt_int)
-                disp_summary["영업용_사용량"] = disp_summary["영업용_사용량"].map(fmt_int)
-                disp_summary["영업용_비중(%)"] = disp_summary["영업용_비중(%)"].map(
-                    lambda v: f"{v:,.1f}%"
-                )
-
-                st.markdown("### 1) 최종 평가 요약표 (총점 + 2-3항목 + 사용실적)")
-                st.dataframe(
-                    center_style(disp_summary),
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "총점순위": st.column_config.Column("총점순위", width="small"),
-                    },
-                )
-
-                # 본상: 총점 1위
-                main_row = merged.iloc[0]
-                main_company = main_row["시공업체"]
-
-                # 특별상: 영업용 사용량 기준 상위, 단 본상 업체는 제외
-                biz_rank = merged.sort_values(
-                    ["영업용_사용량", total_col], ascending=[False, False]
-                )
-                biz_rank = biz_rank[biz_rank["시공업체"] != main_company]
-                if len(biz_rank) > 0:
-                    special_row = biz_rank.iloc[0]
-                    special_company = special_row["시공업체"]
-                else:
-                    special_row = None
-                    special_company = None
-
-                st.markdown("---")
-                st.markdown("### 2) 포상 추천 결과")
-
-                # 본상 블록
-                st.markdown(f"#### 🏅 본상(우수 시공업체) 추천 : **{main_company}**")
-
-                st.markdown(
-                    f"""
-- **총점** : {main_row[total_col]} 점  
-- **2-3항목(기존주택 개발 비율) 점수** : {main_row[exist_col]} 점  
-- **신규계량기 수** : {int(main_row["신규계량기수"]):,} 전  
-- **추정 연간사용량 합계** : {fmt_int(main_row["연간사용량합계"])} m³  
-- **영업용 사용량 비중** : {main_row["영업용_비중(%)"]:.1f}%  
+        st.markdown(
+            f"""
+- **본상(우수 시공업체)** : `{main_company}`
+  - 종합점수(총점) **{main_total:.0f}점**으로 전체 1위
+  - 2-3항목(기존주택 개발 비율) 점수 **{main_23:.0f}점**으로  
+    기존 주택 밀집 지역에서의 수요개발 실적도 우수
+- **특별상(기존주택 + 외식업 공급 기여)** : `{special_company}`
+  - 2-3항목 점수 **{special_23:.0f}점**으로 기존주택 공급 비율이 상위권
+  - 외식업(식당·프랜차이즈 등) 추정 연간사용량 **{fmt_int(special_rest)} m³** 로  
+    비(非)가정용 중에서도 식당·프랜차이즈 영역에서의 신규 수요 창출 기여도가 높음
+  - 종합점수(총점)도 **{special_total:.0f}점**으로 상위권을 유지하여  
+    **기존주택 + 상점·외식업 수요개발을 동시에 달성한 사례**로 평가 가능
 """
-                )
+        )
 
-                st.markdown(
-                    """
-**선정 논리 (보고서용 문장 예시)**  
+        st.markdown("---")
+        st.markdown("#### 3) 항목별 시사점 정리")
 
-1. 평가표 상 1-1, 2-1, 2-2, 2-3, 3-1, 3-2 전 항목을 합산한 **종합점수(총점) 1위**로,  
-   경영·수요개발·품질 측면에서 전반적인 성과가 가장 우수함.
-2. 특히 **2-3항목(기존주택 개발 비율)** 점수가 높아,  
-   기존에 가스배관이 구축된 지역을 중심으로 **효율적인 관로 활용·수요개발**을 수행한 것으로 평가됨.
-3. 신규계량기 수와 연간사용량이 모두 상위권을 유지하고 있어,  
-   단순 물량 확대가 아니라 **효율·품질·안전이 균형 잡힌 시공 실적**을 보여줌.
+        st.markdown(
+            """
+- **2-3항목(기존주택 개발 비율)**  
+  - 기존 배관이 깔려 있는 지역에서 추가로 신규 계량기를 설치한 비율을 의미하며,  
+    동일 물량 대비 투자비와 공사 난이도가 상대적으로 낮아 **회사 입장에서는 공급 효율이 높은 실적**으로 해석할 수 있다.
+- **외식업(식당·프랜차이즈 등) 공급 실적**  
+  - 단위 고객당 사용량이 가정용보다 크고, 장기 계약이 유지되는 경향이 있어  
+    **안정적인 판매량·매출 기반을 만들어 주는 수요**로 볼 수 있다.
+- 따라서,  
+  - 총점 1위 업체는 **전체적인 종합 역량(수요개발·품질·관리)** 이 가장 우수한 사례로 **본상**을 부여하고,  
+  - 2-3항목과 외식업 사용량 지수를 함께 고려했을 때 두 지표 모두 의미 있게 높은 업체를 **특별상**으로 선정하는 방식이  
+    회사의 **공급 효율성 제고 + 전략용도(외식업) 집중 육성**이라는 두 가지 목표를 동시에 충족시키는 포상 체계가 된다.
 """
-                )
+        )
 
-                # 특별상 블록
-                st.markdown("---")
-                if special_company is None:
-                    st.info("영업용 사용량 기준으로 본상과 다른 업체를 찾지 못해 특별상 후보가 없습니다.")
-                else:
-                    st.markdown(f"#### ⭐ 특별상(영업용 수요 확대) 추천 : **{special_company}**")
 
-                    st.markdown(
-                        f"""
-- **총점 순위** : {int(special_row['총점순위'])} 위  
-- **총점** : {special_row[total_col]} 점  
-- **2-3항목(기존주택 비율) 점수** : {special_row[exist_col]} 점  
-- **신규계량기 수** : {int(special_row["신규계량기수"]):,} 전  
-- **추정 연간사용량 합계** : {fmt_int(special_row["연간사용량합계"])} m³  
-- **영업용 사용량** : {fmt_int(special_row["영업용_사용량"])} m³  
-- **영업용 사용량 비중** : {special_row["영업용_비중(%)"]:.1f}%  
-"""
-                    )
-
-                    st.markdown(
-                        """
-**선정 논리 (보고서용 문장 예시)**  
-
-1. 종합점수는 본상 업체 대비 다소 낮지만,  
-   가정용 외 **영업용(식당·프랜차이즈 등) 신규 수요 개발 실적이 가장 크고 비중도 높음.**
-2. 특히 자사 공급망 확대에 기여도가 큰 업종(일반음식점, 프랜차이즈 등)을 중심으로  
-   신규 계량기 설치와 사용량 기반 성장이 확인되어,  
-   **영업용 수요처 발굴·개척 측면에서 탁월한 공헌**을 한 것으로 평가됨.
-3. 기존주택 개발 비율(2-3항목)에서도 일정 수준 이상의 점수를 유지하여,  
-   신규 시장 개척과 더불어 **기존 관로 활용 측면에서도 균형 잡힌 실적**을 보임.
-"""
-                    )
-
-                # 본상/특별상 용도별 세부 실적
-                st.markdown("---")
-                st.markdown("### 3) 본상·특별상 업체 용도별 세부 실적")
-
-                def show_detail_block(title, company_name):
-                    st.markdown(f"#### {title} – {company_name}")
-                    sub = usage_by_type[usage_by_type["시공업체"] == company_name].copy()
-                    if sub.empty:
-                        st.info("세부 사용량 데이터가 없습니다.")
-                        return
-                    sub = sub.sort_values("연간사용량_추정", ascending=False)
-                    sub["연간총"] = sub["연간사용량_추정"]
-                    sub["추정 연간사용량(m³)"] = sub["연간총"].map(fmt_int)
-                    sub["전수(전)"] = sub["전수"].map(lambda x: f"{int(x):,}")
-                    disp = sub[["용도", "추정 연간사용량(m³)", "전수(전)"]]
-                    st.dataframe(
-                        center_style(disp),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-
-                show_detail_block("본상 업체 용도별 실적", main_company)
-                if special_company is not None:
-                    show_detail_block("특별상 업체 용도별 실적", special_company)
+# --------------------------------------------------
+# 메인 함수 (Streamlit 실행 시 필요하면 사용)
+# --------------------------------------------------
+# Streamlit Cloud / `streamlit run app.py` 환경에선
+# 상단 코드가 곧바로 실행되므로 별도 main() 은 생략해도 된다.
