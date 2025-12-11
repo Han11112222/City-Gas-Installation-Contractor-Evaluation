@@ -259,9 +259,6 @@ with col4:
             f"{total_meters_incl_apt:,} 전",
         )
 
-# ─────────────────────────────────────────────
-# 탭 구성
-# ─────────────────────────────────────────────
 tab_rank, tab_type, tab_detail, tab_final = st.tabs(
     ["업체별 순위", "용도별 분석", "업체별 용도 분석", "최종분석"]
 )
@@ -683,147 +680,170 @@ with tab_final:
 
     st.markdown(
         """
-- 별도의 시공업체 **평가점수표(1-1~3-2, 감점, 총점 포함)** 를 엑셀로 업로드하면  
-  **총점 + 2-3항목(기존주택 개발 비율)** 점수를 활용해 본상/특별상 후보를 자동 추천합니다.
+- **별도의 파일 업로드는 필요 없음.**  
+  위에서 선택한 **신규계량기 사용량 엑셀 파일** 안에서  
+  시공업체 **평가점수표(1-1~3-2, 감점, 총점 포함)** 시트를 자동으로 찾습니다.
+- 평가표 시트에서 **총점 + 2-3항목(기존주택 개발 비율)** 점수를 활용해  
+  본상/특별상 후보를 자동 추천합니다.
 - 기존주택 비율은 이미 평가기준 **2-3항목 점수**로 반영되어 있으므로,  
   이 탭에서는 비율을 다시 계산하지 않고 **2-3 점수 컬럼**을 그대로 사용합니다.
 """
     )
 
-    eval_file = st.file_uploader(
-        "시공업체 평가점수표 업로드 (2-3항목, 총점 포함)", type=["xlsx"], key="eval_uploader"
-    )
-
-    if eval_file is None:
-        st.info("평가점수표 엑셀을 업로드하면 최종 분석 결과가 표시됩니다.")
+    # 어떤 통합문서를 볼지 선택 (위에서 이미 업로드했던 것 재사용)
+    if uploaded is not None:
+        excel_target = uploaded
     else:
-        # 헤더 탐색용: 우선 전체를 header=None 으로 읽어서 '구분' + '총점' 이 있는 행 찾기
-        eval_raw = pd.read_excel(eval_file, sheet_name=0, header=None)
+        excel_target = DATA_FILE  # 기본 파일 사용
 
-        header_row_idx = None
-        for i, row in eval_raw.iterrows():
+    # 통합문서 안에서 '구분' + '총점' 헤더가 있는 시트를 자동 탐색
+    xls = pd.ExcelFile(excel_target)
+    df_eval = None
+    found_sheet_name = None
+    header_row_idx = None
+
+    for sheet in xls.sheet_names:
+        tmp = pd.read_excel(xls, sheet_name=sheet, header=None)
+        for i, row in tmp.iterrows():
             vals = [str(v).strip() for v in row.values if isinstance(v, str)]
             if ("구분" in vals) and ("총점" in vals):
+                df_eval = pd.read_excel(xls, sheet_name=sheet, header=i)
                 header_row_idx = i
+                found_sheet_name = sheet
                 break
+        if df_eval is not None:
+            break
 
-        if header_row_idx is None:
+    if df_eval is None:
+        st.error(
+            "현재 엑셀 파일 안에서 '구분'과 '총점' 헤더를 가진 평가점수표 시트를 찾지 못했습니다. "
+            "평가표 시트가 같은 파일 안에 있는지, 그리고 헤더 이름이 '구분', '총점'으로 되어 있는지 확인해줘."
+        )
+    else:
+        st.markdown(f"✅ 사용된 평가점수표 시트: **`{found_sheet_name}`** (헤더 행: {header_row_idx+1}행)")
+
+        df_eval.columns = [str(c).strip() for c in df_eval.columns]
+
+        required_cols = ["구분", "2-3", "총점"]
+        missing = [c for c in required_cols if c not in df_eval.columns]
+        if missing:
             st.error(
-                "엑셀 파일에서 '구분'과 '총점' 헤더가 동시에 존재하는 행을 찾지 못했습니다. "
-                "점수표 시트 안에서 헤더 행을 확인해 주세요."
+                f"평가점수표에서 다음 컬럼을 찾지 못했어: {', '.join(missing)}  \n"
+                "시트 안 헤더 이름이 그림의 '구분', '2-3', '총점'과 동일한지 확인해줘."
             )
         else:
-            df_eval = pd.read_excel(eval_file, sheet_name=0, header=header_row_idx)
-            df_eval.columns = [str(c).strip() for c in df_eval.columns]
+            # 합계 같은 행 제거
+            df_eval = df_eval[~df_eval["구분"].isna()].copy()
+            df_eval = df_eval[
+                ~df_eval["구분"].astype(str).str.contains("합계")
+            ].copy()
 
-            required_cols = ["구분", "2-3", "총점"]
-            missing = [c for c in required_cols if c not in df_eval.columns]
-            if missing:
-                st.error(
-                    f"평가점수표에서 다음 컬럼을 찾지 못했습니다: {', '.join(missing)}  "
-                    "헤더 이름이 그림의 '구분', '2-3', '총점'과 동일한지 확인해 주세요."
-                )
-            else:
-                # 불필요한 합계 행 제거
-                df_eval = df_eval[~df_eval["구분"].isna()].copy()
-                df_eval = df_eval[
-                    ~df_eval["구분"].astype(str).str.contains("합계")
-                ].copy()
+            # 점수형 컬럼 숫자로 변환
+            score_cols = ["1-1", "2-1", "2-2", "2-3", "3-1", "3-2", "감점", "총점"]
+            for col in score_cols:
+                if col in df_eval.columns:
+                    df_eval[col] = pd.to_numeric(df_eval[col], errors="coerce")
 
-                # 점수형 컬럼 숫자로 변환
-                score_cols = ["1-1", "2-1", "2-2", "2-3", "3-1", "3-2", "감점", "총점"]
-                for col in score_cols:
-                    if col in df_eval.columns:
-                        df_eval[col] = pd.to_numeric(df_eval[col], errors="coerce")
+            # 총점 기준 정렬 및 순위
+            df_eval = df_eval.sort_values("총점", ascending=False).reset_index(drop=True)
+            df_eval["순위(총점기준)"] = np.arange(1, len(df_eval) + 1)
 
-                # 총점 기준 정렬 및 순위
-                df_eval = df_eval.sort_values("총점", ascending=False).reset_index(drop=True)
-                df_eval["순위(총점기준)"] = np.arange(1, len(df_eval) + 1)
+            # 본상: 총점 1위
+            main_row = df_eval.iloc[0]
+            main_winner = str(main_row["구분"])
 
-                # 본상: 총점 1위
-                main_row = df_eval.iloc[0]
-                main_winner = str(main_row["구분"])
-
-                # 특별상: 본상 제외 후 2-3 점수 → 총점 순으로 정렬
-                cand = df_eval[df_eval["구분"] != main_winner].copy()
+            # 특별상: 본상 제외 후 2-3 점수 → 총점 순
+            cand = df_eval[df_eval["구분"] != main_winner].copy()
+            special_winner = None
+            special_row = None
+            if not cand.empty:
                 cand = cand.sort_values(["2-3", "총점"], ascending=[False, False])
                 special_row = cand.iloc[0]
                 special_winner = str(special_row["구분"])
 
-                # 포상구분 표시
-                def mark_award(row):
-                    name = str(row["구분"])
-                    if name == main_winner:
-                        return "본상(종합 1위)"
-                    elif name == special_winner:
-                        return "특별상(기존주택 비율 우수)"
-                    else:
-                        return ""
+            # 포상구분 표시
+            def mark_award(row):
+                name = str(row["구분"])
+                if name == main_winner:
+                    return "본상(종합 1위)"
+                elif special_winner is not None and name == special_winner:
+                    return "특별상(기존주택 비율 우수)"
+                else:
+                    return ""
 
-                df_eval["포상구분"] = df_eval.apply(mark_award, axis=1)
+            df_eval["포상구분"] = df_eval.apply(mark_award, axis=1)
 
-                # 표시용 테이블
-                disp_cols = [
-                    "순위(총점기준)",
-                    "구분",
-                    "1-1",
-                    "2-1",
-                    "2-2",
-                    "2-3",
-                    "3-1",
-                    "3-2",
-                    "감점",
-                    "총점",
-                    "포상구분",
-                ]
-                exist_cols = [c for c in disp_cols if c in df_eval.columns]
-                view_eval = df_eval[exist_cols].copy()
+            # 출력용 테이블
+            disp_cols = [
+                "순위(총점기준)",
+                "구분",
+                "1-1",
+                "2-1",
+                "2-2",
+                "2-3",
+                "3-1",
+                "3-2",
+                "감점",
+                "총점",
+                "포상구분",
+            ]
+            exist_cols = [c for c in disp_cols if c in df_eval.columns]
+            view_eval = df_eval[exist_cols].copy()
 
-                # 숫자 포맷
-                for col in score_cols:
-                    if col in view_eval.columns:
-                        view_eval[col] = view_eval[col].map(
-                            lambda x: f"{int(x)}" if pd.notna(x) else ""
-                        )
-                if "순위(총점기준)" in view_eval.columns:
-                    view_eval["순위(총점기준)"] = view_eval["순위(총점기준)"].astype(int)
+            for col in score_cols:
+                if col in view_eval.columns:
+                    view_eval[col] = view_eval[col].map(
+                        lambda x: f"{int(x)}" if pd.notna(x) else ""
+                    )
+            if "순위(총점기준)" in view_eval.columns:
+                view_eval["순위(총점기준)"] = view_eval["순위(총점기준)"].astype(int)
 
-                # 하이라이트
-                def highlight_award(row):
-                    if row.get("포상구분") == "본상(종합 1위)":
-                        color = "#FFF4CC"  # 연노랑
-                    elif str(row.get("포상구분", "")).startswith("특별상"):
-                        color = "#E3F2FD"  # 연하늘
-                    else:
-                        color = ""
-                    return [f"background-color: {color}" for _ in row]
+            def highlight_award(row):
+                if row.get("포상구분") == "본상(종합 1위)":
+                    color = "#FFF4CC"  # 본상: 연노랑
+                elif str(row.get("포상구분", "")).startswith("특별상"):
+                    color = "#E3F2FD"  # 특별상: 연하늘
+                else:
+                    color = ""
+                return [f"background-color: {color}" for _ in row]
 
-                styled_eval = center_style(view_eval, highlight_fn=highlight_award)
+            styled_eval = center_style(view_eval, highlight_fn=highlight_award)
 
-                st.markdown("#### 🧾 평가점수표 기반 최종 순위 및 포상 추천")
-                st.dataframe(
-                    styled_eval,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "순위(총점기준)": st.column_config.Column("순위", width="small"),
-                    },
-                )
+            st.markdown("#### 🧾 평가점수표 기반 최종 순위 및 포상 추천")
+            st.dataframe(
+                styled_eval,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "순위(총점기준)": st.column_config.Column("순위", width="small"),
+                },
+            )
 
-                # 보고서용 요약 문장
-                st.markdown("#### 📄 보고서용 요약 문장")
+            # 보고서용 요약 문장
+            st.markdown("#### 📄 보고서용 요약 문장")
 
-                main_total = int(main_row["총점"]) if not pd.isna(main_row["총점"]) else None
-                main_23 = int(main_row["2-3"]) if not pd.isna(main_row["2-3"]) else None
+            main_total = int(main_row["총점"]) if not pd.isna(main_row["총점"]) else None
+            main_23 = int(main_row["2-3"]) if not pd.isna(main_row["2-3"]) else None
+
+            if special_row is not None:
                 spec_total = int(special_row["총점"]) if not pd.isna(special_row["총점"]) else None
                 spec_23 = int(special_row["2-3"]) if not pd.isna(special_row["2-3"]) else None
+            else:
+                spec_total = None
+                spec_23 = None
 
-                st.markdown(
-                    f"""
+            st.markdown(
+                f"""
 - **본상(우수 시공업체)** : `{main_winner}`  
   - 종합점수 **{main_total}점**으로 전체 1위를 기록하였으며,  
     가스시공업 허가취득 연수·공급전 세대수·연 사용예정량·품질관리(시공 부적합 비율, 준공서류 이관율) 등  
     전 항목에서 고르게 우수한 실적을 나타냅니다.
+"""
+            )
+
+            if special_winner is not None:
+                st.markdown(
+                    f"""
 - **특별상(기존주택 개발 우수)** : `{special_winner}`  
   - **2-3항목(기존 주택 개발 비율)** 점수 **{spec_23}점** 및 종합점수 **{spec_total}점**으로 상위권을 유지하고 있으며,  
     기존 가스배관이 구축된 지역 내 미공급 세대 발굴과 음식점·상가 등 고부가가치 수요개발에  
