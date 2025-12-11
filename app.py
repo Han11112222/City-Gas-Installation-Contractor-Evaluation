@@ -705,7 +705,9 @@ with tab_final:
         tmp = excel_obj.parse(sheet_name=sname, header=None)
         for idx in range(len(tmp)):
             row_vals = tmp.iloc[idx].astype(str).tolist()
-            if ("구분" in row_vals) and ("총점" in row_vals):
+            has_gubun = any("구분" in v for v in row_vals)
+            has_total = any("총점" in v for v in row_vals)
+            if has_gubun and has_total:
                 header_row_idx = idx
                 sheet_name_found = sname
                 df_tmp = tmp.iloc[header_row_idx:].copy()
@@ -826,7 +828,3 @@ with tab_final:
 
             st.markdown(f"- {main_text}")
             st.markdown(f"- {special_text}")
-
-
-if __name__ == "__main__":
-    main()
