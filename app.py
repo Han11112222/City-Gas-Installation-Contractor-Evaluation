@@ -60,6 +60,9 @@ TOTAL_METERS_INCL_APT_FIXED = 17_745
 HOME_METERS_FIXED = 2_187
 NONRES_METERS_FIXED = 704
 
+# 상단 KPI용 전체 시공업체 수(1종) 고정값
+TOTAL_COMPANY_FIXED = 70
+
 # --------------------------------------------------
 # 유틸 함수
 # --------------------------------------------------
@@ -354,7 +357,8 @@ top10_share = top10_usage / total_usage_all if total_usage_all > 0 else 0.0
 # --------------------------------------------------
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    st.metric("전체 시공업체 수 (1종)", f"{agg_all.shape[0]:,} 개")
+    # 여기서 70개로 고정
+    st.metric("전체 시공업체 수 (1종)", f"{TOTAL_COMPANY_FIXED:,} 개")
 with col2:
     st.metric("포상 기준 충족 업체 수", f"{eligible.shape[0]:,} 개")
 with col3:
