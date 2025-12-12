@@ -126,8 +126,8 @@ def preprocess(df_raw: pd.DataFrame):
          - 월 사용량이 NaN 또는 0이면 단독주택 월평균표로 강제 치환
          - 치환된 1~12월을 그대로 합산 → 연간사용량_추정
       5) 가정용 외:
-         - 용도에서 단독주택을 제외한 나머지
-         - 월별 값 중 숫자가 있는 달만 골라 평균(= 합계 / 값이 있는 달 수)
+         - 우선 원본 컬럼 '연간 예상사용량' 이 있으면 그 값을 사용
+         - 없으면 월별 값 중 숫자가 있는 달만 골라 평균(= 합계 / 값이 있는 달 수)
          - 월평균 × 12개월 → 연간사용량_추정
     """
     df = df_raw.copy()
@@ -152,11 +152,27 @@ def preprocess(df_raw: pd.DataFrame):
     if "사용여부" in df.columns:
         df = df[df["사용여부"] == "Y"].copy()
 
+    # 문자열/콤마가 섞인 '연간 예상사용량' 숫자 변환
+    annual_col = None
+    for cand in ["연간 예상사용량", "연간예상사용량"]:
+        if cand in df.columns:
+            annual_col = cand
+            break
+    if annual_col is not None:
+        df[annual_col] = (
+            df[annual_col]
+            .astype(str)
+            .str.replace(",", "", regex=False)
+            .replace({"": np.nan})
+        )
+        df[annual_col] = pd.to_numeric(df[annual_col], errors="coerce")
+
     # 계량기별 연간 사용량 추정
     def compute_annual(row):
-        usage = row[month_cols].astype(float)
+        # 월별 사용량
+        usage = row[month_cols].astype(float) if month_cols else pd.Series(dtype=float)
 
-        # ── 가정용: 단독주택 ─────────────────────
+        # 단독주택: 월별 보정 + 합계
         if "용도" in row and row["용도"] == "단독주택":
             for col in month_cols:
                 base = detached_avg_by_col.get(col)
@@ -167,14 +183,18 @@ def preprocess(df_raw: pd.DataFrame):
                         usage[col] = base
             return float(usage.sum())
 
-        # ── 가정용 외: 단독주택 제외 나머지 ───────
-        else:
-            # 값이 있는 달만 사용(블랭크만 제외, 0은 그대로 둠)
-            vals = usage.dropna()
-            if len(vals) == 0:
-                return 0.0
-            monthly_avg = float(vals.mean())  # 예: 3달 값 있으면 /3
-            return monthly_avg * 12.0        # 월평균 × 12개월
+        # 가정용외: 우선 '연간 예상사용량' 사용, 없으면 월평균×12
+        if annual_col is not None:
+            base_annual = row.get(annual_col, np.nan)
+            if not pd.isna(base_annual):
+                return float(base_annual)
+
+        # 백업 로직: 월평균 × 12개월
+        vals = usage.dropna()
+        if len(vals) == 0:
+            return 0.0
+        monthly_avg = float(vals.mean())  # 예: 3달 값 있으면 /3
+        return monthly_avg * 12.0        # 월평균 × 12개월
 
     df["연간사용량_추정"] = df.apply(compute_annual, axis=1)
 
@@ -357,7 +377,7 @@ top10_share = top10_usage / total_usage_all if total_usage_all > 0 else 0.0
 # --------------------------------------------------
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    # 여기서 70개로 고정
+    # 70개 고정
     st.metric("전체 시공업체 수 (1종)", f"{TOTAL_COMPANY_FIXED:,} 개")
 with col2:
     st.metric("포상 기준 충족 업체 수", f"{eligible.shape[0]:,} 개")
