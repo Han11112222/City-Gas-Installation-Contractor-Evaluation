@@ -175,17 +175,43 @@ st.markdown("""
 uploaded = st.file_uploader("엑셀 파일 업로드 (없으면 기본 파일 사용)", type=["xlsx"])
 raw_df = pd.read_excel(uploaded) if uploaded else load_raw(DATA_FILE)
 
-df_proc, agg_all, eligible, usage_by_type, usage_by_type_nonres, month_cols = preprocess(raw_df)
+# --------------------------------------------------
+# ★ 전체 공통 연도 선택 (모든 탭에 적용)
+# --------------------------------------------------
+data_by_year, years = load_yearly_dataset()
+
+st.markdown("---")
+sel_col, _ = st.columns([1, 3])
+with sel_col:
+    global_year = st.selectbox(
+        "📅 분석 연도 선택",
+        years,
+        index=len(years) - 1,
+        format_func=lambda x: f"{x}년",
+        key="global_year",
+    )
+
+# 선택 연도 데이터 로드
+global_info   = data_by_year[global_year]
+df_proc       = global_info["df_proc"]
+agg_all       = global_info["agg_all"]
+eligible      = global_info["eligible"]
+usage_by_type = global_info["usage_by_type"]
+usage_by_type_nonres = global_info["usage_by_type_nonres"]
+raw_df_year   = pd.read_excel(YEARLY_FILES[global_year]) if YEARLY_FILES[global_year].exists() else raw_df
+month_cols    = get_month_cols(df_proc)
+
+st.markdown("---")
 
 total_usage_all = agg_all["연간사용량합계"].sum()
 top10_share = agg_all.sort_values("연간사용량합계", ascending=False)["연간사용량합계"].head(10).sum() / total_usage_all if total_usage_all > 0 else 0
 
 # 상단 KPI
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("전체 시공업체 수 (1종)", f"{TOTAL_COMPANY_FIXED:,} 개")
+c1.metric("전체 시공업체 수 (1종)", f"{agg_all.shape[0]:,} 개")
 c2.metric("포상 기준 충족 업체 수", f"{eligible.shape[0]:,} 개")
-c3.metric("전체 신규계량기 수 (공동주택 제외)", f"{TOTAL_METERS_NO_APT_FIXED:,} 전")
-c4.metric("전체 신규계량기 수 (공동주택 포함)", f"{TOTAL_METERS_INCL_APT_FIXED:,} 전")
+c3.metric("전체 신규계량기 수 (공동주택 제외)", f"{int(agg_all['신규계량기수'].sum()):,} 전")
+c4.metric("추정 연간사용량 합계", f"{fmt_int(total_usage_all)} m³")
 
 # --------------------------------------------------
 # 탭 구성
@@ -195,26 +221,21 @@ tab_year_select, tab_rank, tab_type, tab_detail, tab_final, tab_yearly = st.tabs
 )
 
 # ==================================================
-# 탭1: 연도별 포상 기준 충족 현황 ★ 핵심 신규
+# 탭1: 연도별 포상 기준 충족 현황
 # ==================================================
 with tab_year_select:
-    st.subheader("📅 연도 선택 → 포상 기준 충족 업체 현황")
-
-    data_by_year, years = load_yearly_dataset()
+    st.subheader(f"📅 {global_year}년 포상 기준 충족 업체 현황")
 
     if not years:
         st.warning("연도별 파일을 찾지 못했습니다.")
     else:
-        selected_year = st.selectbox(
-            "분석 연도 선택", years, index=len(years)-1, format_func=lambda x: f"{x}년"
-        )
-
+        selected_year = global_year
         info    = data_by_year[selected_year]
         agg_y   = info["agg_all"]
         elig_y  = info["eligible"]
 
-        # KPI
-        st.markdown(f"### {selected_year}년 요약")
+        # KPI (상단 선택 연도 기준으로 자동 반영)
+        st.markdown(f"### {selected_year}년 포상 현황")
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("전체 시공업체 수 (1종)", f"{agg_y.shape[0]:,} 개")
         k2.metric("포상 기준 충족 업체 수", f"{elig_y.shape[0]:,} 개",
@@ -326,7 +347,7 @@ with tab_rank:
         )
 
     # 토글 상태에 따라 데이터 재처리
-    df_rank, agg_rank, eligible_rank, _, _, _ = preprocess(raw_df, include_apt=include_apt_rank)
+    df_rank, agg_rank, eligible_rank, _, _, _ = preprocess(raw_df_year, include_apt=include_apt_rank)
 
     elig_names_rank = set(eligible_rank.index.tolist())
     apt_label = "공동주택(아파트) 포함" if include_apt_rank else "공동주택(아파트) 제외"
@@ -569,7 +590,7 @@ with tab_final:
 with tab_yearly:
     st.subheader("📆 연간 추이 분석")
 
-    data_by_year_t6, years_t6 = load_yearly_dataset()
+    data_by_year_t6, years_t6 = data_by_year, years
 
     if not years_t6:
         st.info("연간 분석에 사용할 연도별 파일을 찾지 못했습니다.")
